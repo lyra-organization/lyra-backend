@@ -1,56 +1,89 @@
 // ============================================================
-// EMBED EDGE FUNCTION
+// MULTI-VECTOR EMBED & SAVE FUNCTION
 //
-// Takes a text description of someone's personality and turns
-// it into 512 numbers (a "vector") using OpenAI's embedding API.
-//
-// These numbers are a mathematical fingerprint of who someone is.
-// Two people's fingerprints can be compared with simple math
-// to see how compatible they are.
-//
-// Why does this exist? Same reason as /interview —
-// to hide the OpenAI API key from the phone.
+// 1. Receives the full JSON profile from the phone.
+// 2. Turns each of the 8 dimensions into a 512-dim vector.
+// 3. Saves the profile + all 8 vectors directly to Postgres.
 // ============================================================
 
 import "@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
-// Allow requests from the phone app
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
 Deno.serve(async (req) => {
-  // Handle browser preflight checks (CORS)
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  try {
+    const { userId, profile, transcript } = await req.json();
+
+    // 1. Prepare the 8 strings for embedding
+    const fieldsToEmbed = [
+      JSON.stringify(profile.big_five),
+      profile.values.join(", "),
+      profile.interests.join(", "),
+      profile.energy_pattern,
+      profile.communication_style,
+      profile.relationship_style,
+      profile.compatibility_notes,
+      profile.keywords.join(", ")
+    ];
+
+    // 2. Call OpenAI Batch Embedding
+    const openAIResponse = await fetch("https://api.openai.com/v1/embeddings", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${Deno.env.get("OPENAI_API_KEY")}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "text-embedding-3-small",
+        input: fieldsToEmbed,
+        dimensions: 512,
+      }),
+    });
+
+    const openAIData = await openAIResponse.json();
+    if (openAIData.error) throw new Error(openAIData.error.message);
+
+    const vectors = openAIData.data.map((d: any) => d.embedding);
+
+    // 3. Save directly to Database
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")! // Service role bypasses RLS
+    );
+
+    const { error } = await supabase
+      .from("profiles")
+      .upsert({
+        user_id: userId,
+        transcript: transcript,
+        summary: profile.summary,
+        traits: profile,
+        v_big_five: vectors[0],
+        v_values: vectors[1],
+        v_interests: vectors[2],
+        v_energy: vectors[3],
+        v_communication: vectors[4],
+        v_relationship: vectors[5],
+        v_compatibility: vectors[6],
+        v_keywords: vectors[7]
+      });
+
+    if (error) throw error;
+
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
-
-  // The phone sends us a text string like:
-  // "A creative introvert who values authenticity and loves hiking..."
-  const { input } = await req.json();
-
-  // Forward that text to OpenAI's embedding API
-  // OpenAI turns it into 512 numbers
-  const response = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${Deno.env.get("OPENAI_API_KEY")}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "text-embedding-3-small",
-      input,
-      dimensions: 512, // 512 numbers per person
-    }),
-  });
-
-  const data = await response.json();
-
-  // Send the 512-number vector back to the phone
-  return new Response(
-    JSON.stringify({ embedding: data.data[0].embedding }),
-    { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-  );
 });

@@ -1,7 +1,5 @@
 -- ============================================================
--- LYRA DATABASE SCHEMA
---
--- 5 tables, that's the whole app.
+-- LYRA DATABASE SCHEMA (v2 — Multi-Vector Engine)
 -- ============================================================
 
 -- PostGIS: lets us ask "who's within 100 meters?"
@@ -11,45 +9,46 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ============================================================
--- USERS — who you are (from onboarding)
+-- USERS — identity and preferences
 -- ============================================================
 CREATE TABLE users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   auth_id UUID REFERENCES auth.users(id) ON DELETE CASCADE UNIQUE,
   name TEXT NOT NULL,
   age INTEGER,
-  gender TEXT,              -- plain text, no constraints
-  show_me TEXT,             -- who they want to see
+  gender TEXT[],              -- Using array for flexibility (e.g. ['man', 'non-binary'])
+  show_me TEXT[],             -- Who they want to see (e.g. ['woman', 'non-binary'])
   photo_url TEXT,
-  expo_push_token TEXT,     -- for sending push notifications
+  expo_push_token TEXT,
   is_active BOOLEAN DEFAULT true,
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- ============================================================
--- PROFILES — what the AI learned about you (from interview)
---
--- transcript: the full chat history as JSON
--- summary: Claude's 2-3 sentence description of you
--- traits: everything Claude figured out (Big Five, values,
---         interests, etc.) stored as one JSON blob
--- embedding: 512 numbers = your personality fingerprint
+-- PROFILES — the high-definition personality fingerprint
 -- ============================================================
 CREATE TABLE profiles (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES users(id) ON DELETE CASCADE UNIQUE,
-  transcript JSONB,
-  summary TEXT,
-  traits JSONB,
-  embedding VECTOR(512),
+  transcript JSONB,           -- The full interview history
+  summary TEXT,               -- 2-3 sentence bio
+  traits JSONB,               -- Raw trait data from Claude
+  
+  -- The 8 Vector Dimensions (512-dim each)
+  v_big_five VECTOR(512),
+  v_values VECTOR(512),
+  v_interests VECTOR(512),
+  v_energy VECTOR(512),
+  v_communication VECTOR(512),
+  v_relationship VECTOR(512),
+  v_compatibility VECTOR(512),
+  v_keywords VECTOR(512),
+  
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- ============================================================
 -- LOCATIONS — where you are right now
---
--- GEOGRAPHY type means distances are in meters (not degrees).
--- One row per user, updated every time GPS reports.
 -- ============================================================
 CREATE TABLE locations (
   user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -59,97 +58,114 @@ CREATE TABLE locations (
 
 -- ============================================================
 -- MATCHES — when two people are connected
---
--- Created automatically by the match trigger (see below).
--- status: pending → approved → met (or rejected)
 -- ============================================================
 CREATE TABLE matches (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_a UUID REFERENCES users(id),
   user_b UUID REFERENCES users(id),
-  score FLOAT,              -- compatibility score (0 to 1)
-  status TEXT DEFAULT 'pending',
+  score FLOAT,              -- Weighted similarity score (0 to 1)
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'met')),
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- ============================================================
--- INTERACTIONS — history, so you never see the same person twice
+-- INTERACTIONS — history (prevents re-matching)
 -- ============================================================
 CREATE TABLE interactions (
   id BIGSERIAL PRIMARY KEY,
   actor_id UUID REFERENCES users(id),
   target_id UUID REFERENCES users(id),
-  action TEXT,              -- liked, passed, reported
+  action TEXT CHECK (action IN ('liked', 'passed', 'reported')),
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- ============================================================
--- INDEXES — make queries fast
---
--- GiST index: makes "find everyone within 100m" instant
--- HNSW index: makes "find similar personalities" instant
+-- INDEXES — optimized for geography and high-dim vectors
 -- ============================================================
 CREATE INDEX idx_locations_geo ON locations USING GIST(location);
-CREATE INDEX idx_profiles_embedding ON profiles USING hnsw(embedding vector_cosine_ops);
+CREATE INDEX idx_profiles_v_values ON profiles USING hnsw(v_values vector_cosine_ops);
+CREATE INDEX idx_profiles_v_big_five ON profiles USING hnsw(v_big_five vector_cosine_ops);
 CREATE UNIQUE INDEX idx_interactions_pair ON interactions(actor_id, target_id);
 
 -- ============================================================
--- REALTIME — tell Supabase to broadcast changes to these tables
--- over WebSocket so phones get instant updates
+-- ROW LEVEL SECURITY (RLS)
+-- ============================================================
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE matches ENABLE ROW LEVEL SECURITY;
+
+-- Users can manage their own data
+CREATE POLICY "Users can manage own record" ON users ALL USING (auth.uid() = auth_id);
+CREATE POLICY "Users can manage own location" ON locations ALL USING (auth.uid() IN (SELECT auth_id FROM users WHERE id = user_id));
+CREATE POLICY "Users can view own profile" ON profiles SELECT USING (auth.uid() IN (SELECT auth_id FROM users WHERE id = user_id));
+
+-- The Edge Function (via service_role) will handle inserts to profiles and matches
+-- but we allow users to read their matches
+CREATE POLICY "Users can view own matches" ON matches SELECT USING (
+  auth.uid() IN (SELECT auth_id FROM users WHERE id IN (user_a, user_b))
+);
+
+-- ============================================================
+-- REALTIME
 -- ============================================================
 ALTER PUBLICATION supabase_realtime ADD TABLE matches, locations;
 
 -- ============================================================
--- MATCH TRIGGER
+-- THE MATCHING ENGINE (Trigger)
 --
--- This is the magic. Every time a location updates, Postgres
--- automatically checks: "is anyone compatible within 100m?"
--- If yes, it creates a match. No server code needed.
---
--- The chain: location update → trigger → match created →
---            webhook → Edge Function → push notification
+-- Calculates a weighted similarity across 8 personality vectors.
+-- Weights:
+-- Values: 35% | Big Five: 25% | Interests: 15% | Others: 5% each
 -- ============================================================
 CREATE OR REPLACE FUNCTION trigger_match_check()
 RETURNS TRIGGER LANGUAGE plpgsql
-SECURITY DEFINER  -- bypasses row-level security (needs to read all users)
+SECURITY DEFINER
 AS $$
 DECLARE
-  current_user_rec RECORD;
-  current_profile RECORD;
+  me RECORD;
+  my_p RECORD;
 BEGIN
-  -- Look up the user who just moved
-  SELECT * INTO current_user_rec FROM users WHERE id = NEW.user_id;
-  SELECT * INTO current_profile FROM profiles WHERE user_id = NEW.user_id;
+  -- 1. Look up the user who just moved
+  SELECT * INTO me FROM users WHERE id = NEW.user_id;
+  SELECT * INTO my_p FROM profiles WHERE user_id = NEW.user_id;
 
-  -- If they haven't done the interview yet, skip
-  IF current_profile.embedding IS NULL THEN RETURN NEW; END IF;
+  -- Skip if they haven't completed the interview
+  IF my_p.v_values IS NULL THEN RETURN NEW; END IF;
 
-  -- Find the most compatible person within 100m and create a match
+  -- 2. Find the most compatible person nearby
   INSERT INTO matches (user_a, user_b, score)
   SELECT
     NEW.user_id,
     u.id,
-    -- Cosine similarity: 1 = identical, 0 = nothing in common
-    1 - (current_profile.embedding <=> p.embedding)
+    (
+      (1 - (my_p.v_values <=> p.v_values)) * 0.35 +
+      (1 - (my_p.v_big_five <=> p.v_big_five)) * 0.25 +
+      (1 - (my_p.v_interests <=> p.v_interests)) * 0.15 +
+      (1 - (my_p.v_energy <=> p.v_energy)) * 0.05 +
+      (1 - (my_p.v_communication <=> p.v_communication)) * 0.05 +
+      (1 - (my_p.v_relationship <=> p.v_relationship)) * 0.05 +
+      (1 - (my_p.v_compatibility <=> p.v_compatibility)) * 0.05 +
+      (1 - (my_p.v_keywords <=> p.v_keywords)) * 0.05
+    ) as total_score
   FROM users u
   JOIN locations l ON l.user_id = u.id
   JOIN profiles p ON p.user_id = u.id
-  WHERE u.id != NEW.user_id                           -- not yourself
-    AND u.is_active = true                             -- still active
-    AND ST_DWithin(l.location, NEW.location, 100)      -- within 100 meters
-    AND p.embedding IS NOT NULL                        -- completed interview
-    AND u.gender = current_user_rec.show_me            -- gender preferences
-    AND current_user_rec.gender = u.show_me            -- bidirectional
-    AND NOT EXISTS (                                   -- never interacted before
-      SELECT 1 FROM interactions i
-      WHERE i.actor_id = NEW.user_id AND i.target_id = u.id
-    )
-    AND NOT EXISTS (                                   -- no existing match
-      SELECT 1 FROM matches m
-      WHERE (m.user_a = NEW.user_id AND m.user_b = u.id)
-         OR (m.user_a = u.id AND m.user_b = NEW.user_id)
-    )
-  ORDER BY p.embedding <=> current_profile.embedding ASC  -- most compatible first
+  WHERE u.id != NEW.user_id                           -- Not me
+    AND u.is_active = true                             -- Still active
+    AND ST_DWithin(l.location, NEW.location, 100)      -- Within 100m
+    AND p.v_values IS NOT NULL                         -- Has vectors
+    
+    -- GENDER MATCHING (Array Overlap Logic)
+    -- "Does my gender exist in their show_me, AND does their gender exist in my show_me?"
+    AND me.gender && u.show_me 
+    AND u.gender && me.show_me
+    
+    -- HISTORY & COOLDOWN
+    AND NOT EXISTS (SELECT 1 FROM interactions i WHERE i.actor_id = me.id AND i.target_id = u.id)
+    AND NOT EXISTS (SELECT 1 FROM matches m WHERE (m.user_a = me.id OR m.user_b = me.id) AND m.status = 'pending')
+    
+  ORDER BY 1 - (my_p.v_values <=> p.v_values) ASC -- Quick rough sort by values
   LIMIT 1
   ON CONFLICT DO NOTHING;
 
@@ -157,7 +173,6 @@ BEGIN
 END;
 $$;
 
--- Wire it up: run trigger_match_check every time a location changes
 CREATE TRIGGER on_location_update
 AFTER INSERT OR UPDATE ON locations
 FOR EACH ROW
