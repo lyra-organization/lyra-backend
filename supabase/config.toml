@@ -409,6 +409,12 @@ entrypoint = "./functions/embed/index.ts"
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/embed/*.html" ]
 
+[functions.respond-match]
+enabled = true
+verify_jwt = true
+import_map = "./functions/respond-match/deno.json"
+entrypoint = "./functions/respond-match/index.ts"
+
 [functions.send-push]
 enabled = true
 verify_jwt = false  # Database webhooks don't send JWTs — they're server-to-server
