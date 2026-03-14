@@ -165,7 +165,7 @@ BEGIN
     AND NOT EXISTS (SELECT 1 FROM interactions i WHERE i.actor_id = me.id AND i.target_id = u.id)
     AND NOT EXISTS (SELECT 1 FROM matches m WHERE (m.user_a = me.id OR m.user_b = me.id) AND m.status = 'pending')
     
-  ORDER BY 1 - (my_p.v_values <=> p.v_values) ASC -- Quick rough sort by values
+  ORDER BY 1 - (my_p.v_values <=> p.v_values) DESC -- Highest similarity first
   LIMIT 1
   ON CONFLICT DO NOTHING;
 
