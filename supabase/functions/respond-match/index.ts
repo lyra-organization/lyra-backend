@@ -213,6 +213,34 @@ Deno.serve(async (req) => {
         .update({ status: "confirmed" })
         .eq("id", matchId);
 
+      // Send push to user_b so they know to open radar
+      const { data: userB } = await supabase
+        .from("users")
+        .select("expo_push_token, name")
+        .eq("id", match.user_b)
+        .single();
+
+      const { data: userA } = await supabase
+        .from("users")
+        .select("name")
+        .eq("id", match.user_a)
+        .single();
+
+      if (userB?.expo_push_token) {
+        await fetch("https://exp.host/--/api/v2/push/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            to: userB.expo_push_token,
+            title: "It's a match!",
+            body: `${userA?.name ?? "Someone"} wants to meet too — open your radar!`,
+            data: { matchId, url: `/(app)/radar/${matchId}` },
+            sound: "default",
+            priority: "high",
+          }),
+        });
+      }
+
       return new Response(
         JSON.stringify({ status: "confirmed" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
