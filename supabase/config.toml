@@ -389,7 +389,7 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 
 [functions.interview]
 enabled = true
-verify_jwt = true
+verify_jwt = false
 import_map = "./functions/interview/deno.json"
 # Uncomment to specify a custom file path to the entrypoint.
 # Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
@@ -400,7 +400,7 @@ entrypoint = "./functions/interview/index.ts"
 
 [functions.embed]
 enabled = true
-verify_jwt = true
+verify_jwt = false
 import_map = "./functions/embed/deno.json"
 # Uncomment to specify a custom file path to the entrypoint.
 # Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
@@ -411,7 +411,7 @@ entrypoint = "./functions/embed/index.ts"
 
 [functions.respond-match]
 enabled = true
-verify_jwt = true
+verify_jwt = false
 import_map = "./functions/respond-match/deno.json"
 entrypoint = "./functions/respond-match/index.ts"
 
