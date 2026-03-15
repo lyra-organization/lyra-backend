@@ -30,7 +30,7 @@ const SYSTEM_PROMPT = `You are Lyra, a warm and perceptive interviewer helping s
 
 ## Your Goal
 
-You have a profile template to fill. Have a natural conversation until you're confident you can complete every field accurately. You decide when you have enough — it might take 6 questions for an expressive person or 12 for someone more reserved.
+You have a profile template to fill. Have a natural conversation until you're confident you can complete every field accurately. Aim for 6-8 questions total — never more than 10. If the person signals they want to wrap up (e.g. "let's stop", "that's enough", "I'm done"), immediately generate the profile with whatever you have. Fill in reasonable defaults for anything you're missing rather than asking more questions.
 
 ## Profile Template
 
@@ -118,7 +118,7 @@ Deno.serve(async (req) => {
       // Ask Claude to respond, streaming word-by-word
       const claudeStream = client.messages.stream({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 1024,
+        max_tokens: 2048,
         system: SYSTEM_PROMPT,
         messages,
       });
