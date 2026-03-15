@@ -9,7 +9,7 @@ ALTER TABLE matches ADD CONSTRAINT uq_match_pair UNIQUE (user_a, user_b);
 ALTER TABLE matches ADD CONSTRAINT ck_no_self_match CHECK (user_a != user_b);
 
 -- Add 'confirmed' status (both users accepted)
-ALTER TABLE matches DROP CONSTRAINT matches_status_check;
+ALTER TABLE matches DROP CONSTRAINT IF EXISTS matches_status_check;
 ALTER TABLE matches ADD CONSTRAINT matches_status_check
   CHECK (status IN ('pending', 'approved', 'confirmed', 'rejected', 'met'));
 
