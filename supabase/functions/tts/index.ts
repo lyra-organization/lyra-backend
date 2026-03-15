@@ -31,11 +31,11 @@ Deno.serve(async (req) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "tts-1",
+        model: "tts-1-hd",
         input: text.trim(),
-        voice: "nova",       // warm, natural female voice
+        voice: "nova",
         response_format: "mp3",
-        speed: 1.0,
+        speed: 1.05,
       }),
     });
 
